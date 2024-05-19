@@ -1,0 +1,1 @@
+Download mấy file trong url này nhá: https://huggingface.co/trituenhantaoio/bert-base-vietnamese-uncased/tree/main
