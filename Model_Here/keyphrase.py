@@ -3,19 +3,39 @@ import transformers
 from transformers import AutoTokenizer
 import torch
 import torch.nn as nn
-from torchcrf import CRF
+from TorchCRF import CRF
 import joblib
 import preprocess
+import os
+from score_extract import get_sentence_score_and_info, combine_dicts
+#pip scikit-learn
 
-BASE_MODEL_PATH = "./KeyPhraseModel/bert-base-uncased"
-MODEL_PATH = "./KeyPhraseModel/BERT-BiLSTM-CRF"
+def base_model_path():
+  current_directory = os.path.dirname(os.path.abspath(__file__))  # Lấy thư mục chứa chương trình đang chạy
+  model_directory = os.path.join(current_directory, "KeyPhraseModel")
+  model_path = os.path.join(model_directory, "bert-base-uncased")
+  return model_path
+
+def bin_path(bin_name = 'trained_model_3.bin'):
+  current_directory = os.path.dirname(os.path.abspath(__file__))  # Lấy thư mục chứa chương trình đang chạy
+  model_directory = os.path.join(current_directory, "KeyPhraseModel")
+  model_path = os.path.join(model_directory, "BERT-BiLSTM-CRF")
+  train_model_path = os.path.join(model_path, bin_name)
+  return train_model_path
+
 MAX_LEN = 256
-TOKENIZER = transformers.BertTokenizer.from_pretrained(
-    BASE_MODEL_PATH,
+
+def tokenizer():
+    return transformers.BertTokenizer.from_pretrained(
+    base_model_path(),
     do_lower_case=True
 )
 
-with open('vietnamese-stopwords.txt', 'r', encoding='utf-8') as file:
+def vie_stopwords_path():
+  current_directory = os.path.dirname(os.path.abspath(__file__))  # Lấy thư mục chứa chương trình đang chạy
+  return os.path.join(current_directory, "vietnamese-stopwords.txt")
+
+with open(vie_stopwords_path(), 'r', encoding='utf-8') as file:
     stop_words = file.read().splitlines()
 
 def remove_stopwords(text):
@@ -28,7 +48,7 @@ class EntityModel(nn.Module):
     def __init__(self, num_tag):
         super(EntityModel, self).__init__()
         self.num_tag = num_tag
-        self.bert = transformers.BertModel.from_pretrained(BASE_MODEL_PATH,return_dict=False)
+        self.bert = transformers.BertModel.from_pretrained(base_model_path(),return_dict=False)
         self.bilstm= nn.LSTM(768, 1024 // 2, num_layers=1, bidirectional=True, batch_first=True)
 
         self.dropout_tag = nn.Dropout(0.3)
@@ -88,7 +108,7 @@ class EntityDataset:
         target_tag =[]
 
         for i, s in enumerate(text):
-            inputs = TOKENIZER.encode(
+            inputs = tokenizer().encode(
                 str(s),
                 add_special_tokens=False
             )
@@ -152,7 +172,7 @@ def reverse_tokenize(ids, tags):
     tokens = []
     tags_list = []
     for token_id, tag in zip(ids, tags):
-        token = TOKENIZER.decode(token_id)
+        token = tokenizer().decode(token_id)
         token = token.replace(' ', '')
         token_array = np.array(list(token))
         token_string = ''.join(token_array)
@@ -166,25 +186,70 @@ def reverse_tokenize(ids, tags):
             tokens.append(token_string)
             tags_list.append(tag)
     # return list(zip(tokens, tags_list))
-    return list(tokens)
+    return list(tokens), list(tags_list)
     
 
 
-meta_data = joblib.load("./KeyPhraseModel/BERT-BiLSTM-CRF/meta.bin")
+meta_data = joblib.load(bin_path("meta.bin"))
 enc_tag = meta_data["enc_tag"]
-keyphrase_tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_PATH, use_fast=False)
+keyphrase_tokenizer = AutoTokenizer.from_pretrained(base_model_path(), use_fast=False)
 model_bert_keyphrase = EntityModel(3)
-model_bert_keyphrase.load_state_dict(torch.load('./KeyPhraseModel/BERT-BiLSTM-CRF/trained_model_3.bin', map_location=torch.device('cpu')))
+model_bert_keyphrase.load_state_dict(torch.load(bin_path(), map_location=torch.device('cpu')))
 model_bert_keyphrase.eval()
 device = torch.device("cpu")
 model_bert_keyphrase.to(device)
 
-def keyphraseExtraction(text):
-    text = preprocess.remove_stopwords(text)
-    text = preprocess.remove_punctuation(text)
-    tokenized_sentence = TOKENIZER.encode(text)
+def remove_punctuation(text):
+  """Removes punctuation from a string.
+
+  Args:
+      text: The string to remove punctuation from.
+
+  Returns:
+      A new string with all punctuation characters removed.
+  """
+
+  # Define punctuation characters
+  punctuation = "!\"#$%&()*+,./:;<=>?@[\\]^_`{|}~"
+
+  # Use translation table to remove punctuation
+  no_punct_text = text.translate(str.maketrans('', '', punctuation))
+
+  return no_punct_text
+
+def entitesExtraction(text):
+    # text = preprocess.remove_stopwords(text)
+    # text = remove_stopwords(text)
+    text = remove_punctuation(text)
+    tokenized_sentence = tokenizer().encode(text)
     tags = predict_sentence(model_bert_keyphrase, text, enc_tag)
+    reversed_tokens, reversed_tags = reverse_tokenize(tokenized_sentence, tags)
+    return text, reversed_tokens, reversed_tags
 
-    reversed_tokens = reverse_tokenize(tokenized_sentence, tags)
-    return reversed_tokens
+def TextEntities_Score(text):
+    sentences = text.split('.')
+    sentences = [sentence.strip() for sentence in sentences if sentence.strip()]
+    dicts_sentiment = {}
+    dicts_adj_feature = {}
+    list_noun_feature = []
+    list_proper_noun_feature = []
+    for sentence in sentences:
+        sentence_text, reversed_tokens, reversed_tags = entitesExtraction(sentence)
+        dict_sentiment, noun_feature, dict_adj_feature, proper_noun_feature = get_sentence_score_and_info(sentence_text, reversed_tokens, reversed_tags)
+        dicts_sentiment = combine_dicts(dicts_sentiment, dict_sentiment)
+        dicts_adj_feature = combine_dicts(dicts_adj_feature, dict_adj_feature)
+        list_noun_feature.extend(noun_feature)
+        list_proper_noun_feature.extend(proper_noun_feature)
+    return dicts_sentiment, dicts_adj_feature, list_noun_feature, list_proper_noun_feature
 
+
+# text = "Cho tôi 1 địa điểm du lịch với công viên nước, các con vật, thiên nhiên mát mẻ. Đặc biệt là chó, con trai tôi rất thích chó. Và ở gần đó tôi muốn có cả những khách sạn chuẩn 5 sao, tiện nghi, sang trọng để gia đình tôi có thể có trải nghiệm tốt nhất trong thời gian tại Việt Nam."
+# print(entitesExtraction(text))
+# # sentence_text, reversed_tokens, reversed_tags = entitesExtraction("Cho tôi 1 địa điểm du lịch hang động, với các đồi núi lớn")
+# # dict_sentiment, noun_feature, dict_adj_feature, proper_noun_feature = get_sentence_score_and_info(sentence_text, reversed_tokens, reversed_tags)
+# # print(dict_sentiment)
+
+# dicts_sentiment, dicts_adj_feature, list_noun_feature, list_proper_noun_feature = TextEntities_Score(text)
+# print(dicts_sentiment)
+# print(dicts_adj_feature)
+# print(list_proper_noun_feature)
